@@ -66,9 +66,8 @@ dims_operation_func
     dims_sharpen_operation,
     dims_quality_operation,
     dims_format_operation,
-    dims_legacy_thumbnail_operation,
-    dims_smart_crop_operation,
-    dims_legacy_crop_operation;
+    dims_unsharp_operation,
+    dims_smart_crop_operation;
 
 struct dims_config_rec {
     int download_timeout;
@@ -81,6 +80,7 @@ struct dims_config_rec {
     long no_image_expire;
     long default_expire;
     int strip_metadata;
+    char *default_commands;
 
     MagickSizeType area_size;
     MagickSizeType memory_size;

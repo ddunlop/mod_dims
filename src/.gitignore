@@ -1,0 +1,10 @@
+.deps/
+.libs/
+build
+libmod_dims.la
+libmod_dims_la-mod_dims.lo
+libmod_dims_la-mod_dims.o
+libmod_dims_la-mod_dims_ops.lo
+libmod_dims_la-mod_dims_ops.o
+libmod_dims_la-smartcrop.lo
+libmod_dims_la-smartcrop.o

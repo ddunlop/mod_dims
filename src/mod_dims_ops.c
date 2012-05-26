@@ -72,7 +72,10 @@ dims_resize_operation (dims_request_rec *d, char *args, char **err) {
     MagickStatusType flags;
     RectangleInfo rec;
 
-    flags = ParseSizeGeometry(GetImageFromMagickWand(d->wand), args, &rec);
+    rec.width = MagickGetImageWidth(d->wand);
+    rec.height = MagickGetImageHeight(d->wand);
+
+    flags = ParseMetaGeometry(args, &rec.x, &rec.y, &rec.width, &rec.height);
     if(!(flags & AllValues)) {
         *err = "Parsing thumbnail geometry failed";
         return DIMS_FAILURE;
@@ -99,27 +102,40 @@ dims_sharpen_operation (dims_request_rec *d, char *args, char **err) {
 }
 
 apr_status_t
+dims_unsharp_operation (dims_request_rec *d, char *args, char **err) {
+    if(strcmp( args, "true") == 0) {
+        MAGICK_CHECK(MagickUnsharpMaskImage(d->wand, 1.2, 0.6, 4.0, 0), d);
+    }
+    return DIMS_SUCCESS;
+}
+
+apr_status_t
 dims_thumbnail_operation (dims_request_rec *d, char *args, char **err) {
     MagickStatusType flags;
-    RectangleInfo rec;
+    RectangleInfo thumb_info, crop_info;
     char *resize_args = apr_psprintf(d->pool, "%s^", args);
 
-    flags = ParseSizeGeometry(GetImageFromMagickWand(d->wand), resize_args, &rec);
+    thumb_info.width = MagickGetImageWidth(d->wand);
+    thumb_info.height = MagickGetImageHeight(d->wand);
+
+    flags = ParseMetaGeometry(resize_args, &thumb_info.x, &thumb_info.y, &thumb_info.width, &thumb_info.height);
     if(!(flags & AllValues)) {
         *err = "Parsing thumbnail (resize) geometry failed";
         return DIMS_FAILURE;
     }
 
-    MAGICK_CHECK(MagickThumbnailImage(d->wand, rec.width, rec.height), d);
+    MAGICK_CHECK(MagickThumbnailImage(d->wand, thumb_info.width, thumb_info.height), d);
 
     if(!(flags & PercentValue)) {
-        flags = ParseAbsoluteGeometry(args, &rec);
+        flags = ParseAbsoluteGeometry(args, &crop_info);
         if(!(flags & AllValues)) {
             *err = "Parsing thumbnail (crop) geometry failed";
             return DIMS_FAILURE;
         }
 
-        MAGICK_CHECK(MagickCropImage(d->wand, rec.width, rec.height, rec.x, rec.y), d);
+        MAGICK_CHECK(MagickCropImage(d->wand, crop_info.width, crop_info.height,
+        (int)((thumb_info.width-crop_info.width)/2),
+        (int)((thumb_info.height-crop_info.height)/2)), d);
     }
     
     return DIMS_SUCCESS;
@@ -158,78 +174,3 @@ dims_quality_operation (dims_request_rec *d, char *args, char **err) {
     }
     return DIMS_SUCCESS;
 }
-
-/**
- * Legacy API support.
- */
-apr_status_t
-dims_legacy_crop_operation (dims_request_rec *d, char *args, char **err) {
-    MagickStatusType flags;
-    RectangleInfo rec;
-    ExceptionInfo ex_info;
-    long width, height;
-    int x, y;
-
-    flags = ParseGravityGeometry(GetImageFromMagickWand(d->wand), args, &rec, &ex_info);
-
-    if(!(flags & AllValues)) {
-        *err = "Parsing crop geometry failed";
-        return DIMS_FAILURE;
-    }
-
-    width = MagickGetImageWidth(d->wand);
-    height = MagickGetImageHeight(d->wand);
-    x = (width / 2) - (rec.width / 2);
-    y = (height / 2) - (rec.height / 2);
-
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, d->r, 
-        "legacy_crop will crop to %ldx%ld+%d+%d", 
-        rec.width, rec.height, x, y);
-
-    MAGICK_CHECK(MagickCropImage(d->wand, rec.width, rec.height, x, y), d);
-
-    return DIMS_SUCCESS;
-}
-
-apr_status_t
-dims_legacy_thumbnail_operation (dims_request_rec *d, char *args, char **err) {
-    MagickStatusType flags;
-    RectangleInfo rec;
-    long width, height;
-    int x, y;
-    char *resize_args = apr_psprintf(d->pool, "%s^", args);
-
-    flags = ParseSizeGeometry(GetImageFromMagickWand(d->wand), resize_args, &rec);
-    if(!(flags & AllValues)) {
-        *err = "Parsing thumbnail (resize) geometry failed";
-        return DIMS_FAILURE;
-    }
-
-    if(rec.width < 200 && rec.height < 200) {
-        MAGICK_CHECK(MagickThumbnailImage(d->wand, rec.width, rec.height), d);
-    } else {
-        MAGICK_CHECK(MagickScaleImage(d->wand, rec.width, rec.height), d);
-    }
-
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, d->r, 
-        "legacy_thumbnail will resize to %ldx%ld", rec.width, rec.height);
-
-    flags = ParseAbsoluteGeometry(args, &rec);
-    if(!(flags & AllValues)) {
-        *err = "Parsing thumbnail (crop) geometry failed";
-        return DIMS_FAILURE;
-    }
-
-    width = MagickGetImageWidth(d->wand);
-    height = MagickGetImageHeight(d->wand);
-    x = (width / 2) - (rec.width / 2);
-    y = (height / 2) - (rec.height / 2);
-
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, d->r, 
-        "legacy_thumbnail will crop to %ldx%ld+%d+%d", rec.width, rec.height, x, y);
-
-    MAGICK_CHECK(MagickCropImage(d->wand, rec.width, rec.height, x, y), d);
-
-    return DIMS_SUCCESS;
-}
-

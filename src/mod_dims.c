@@ -199,6 +199,18 @@ dims_config_set_strip_metadata(cmd_parms *cmd, void *dummy, const char *arg)
 }
 
 static const char *
+dims_config_set_default_commands(cmd_parms *cmd, void *dummy, const char *arg)
+{
+    dims_config_rec *config = (dims_config_rec *) ap_get_module_config(
+            cmd->server->module_config, &dims_module);
+    if(arg[0] != '/') {
+      arg = apr_pstrcat(cmd->pool, "/", arg, NULL);
+    }
+    config->default_commands = arg;
+    return NULL;
+}
+
+static const char *
 dims_config_set_client(cmd_parms *cmd, void *d, int argc, char *const argv[])
 {
     dims_config_rec *config = (dims_config_rec *) ap_get_module_config(
@@ -644,16 +656,18 @@ dims_send_image(dims_request_rec *d)
 
     int trust_src_img = 0;
 
-    format = MagickGetImageFormat(d->wand);
+    format = MagickGetFormat(d->wand);
 
     start_time = apr_time_now();
     blob = MagickGetImageBlob(d->wand, &length);
     d->imagemagick_time += (apr_time_now() - start_time) / 1000;
 
-    /* Set the Content-Type based on the image format. */
-    content_type = apr_psprintf(d->pool, "image/%s", format);
-    ap_content_type_tolower(content_type);
-    ap_set_content_type(d->r, content_type);
+    /* Set the Content-Type based on the image format if available. */
+    if(strcmp("", format)) {
+        content_type = apr_psprintf(d->pool, "image/%s", format);
+        ap_content_type_tolower(content_type);
+        ap_set_content_type(d->r, content_type);
+    }
 
     if(d->status == DIMS_FILE_NOT_FOUND) {
         d->r->status = HTTP_NOT_FOUND;
@@ -874,7 +888,6 @@ dims_set_optimal_geometry(dims_request_rec *d)
         char *command = ap_getword(d->pool, &cmds, '/');
 
         if(strcmp(command, "resize") == 0 ||
-            strcmp(command, "legacy_thumbnail") == 0 ||
             strcmp(command, "thumbnail") == 0) {
             char *args = ap_getword(d->pool, &cmds, '/');
 
@@ -910,7 +923,26 @@ static apr_status_t
 dims_process_image(dims_request_rec *d) 
 {
     apr_time_t start_time = apr_time_now();
-    const char *cmds = d->unparsed_commands;
+    const char *unparsed_commands = d->unparsed_commands;
+    const char *cmds = unparsed_commands;
+    size_t cmd_length = strlen(cmds);
+
+    // strip the trailing /
+    if( cmds[cmd_length-1] == '/' ) {
+      cmds = unparsed_commands = apr_pstrndup(d->pool, cmds, cmd_length-1);
+    }
+
+    // if there is no / then assume it's a thumbnail request
+    if( cmd_length > 0 && strchr(cmds, '/') == NULL ) {
+      cmds = unparsed_commands = apr_pstrcat( d->pool, "thumbnail/", cmds, NULL);
+    }
+
+    // append the default commands
+    if( d->config->default_commands != NULL ) {
+       cmds = unparsed_commands = apr_pstrcat( d->pool, unparsed_commands, d->config->default_commands, NULL);
+    }
+
+  
 
     /* Hook in the progress monitor.  It gets passed a 
      * dims_progress_rec which keeps track of the start time.
@@ -927,9 +959,10 @@ dims_process_image(dims_request_rec *d)
             (void *) progress_rec);
 
     int exc_strip_cmd = 0;
+    apr_hash_t *run_commands = apr_hash_make(d->pool);
 
     /* Process operations. */
-    while(cmds < d->unparsed_commands + strlen(d->unparsed_commands)) {
+    while(cmds < unparsed_commands + strlen(unparsed_commands)) {
         char *command = ap_getword(d->pool, &cmds, '/');
 
         if(strlen(command) > 0) {
@@ -940,8 +973,6 @@ dims_process_image(dims_request_rec *d)
              */
             if(d->use_no_image && 
                     (strcmp(command, "crop") == 0 ||
-                     strcmp(command, "legacy_thumbnail") == 0 ||
-                     strcmp(command, "legacy_crop") == 0 ||
                      strcmp(command, "thumbnail") == 0)) {
                 MagickStatusType flags;
                 RectangleInfo rec;
@@ -970,18 +1001,23 @@ dims_process_image(dims_request_rec *d)
                 exc_strip_cmd = 1;
             }
 
-            dims_operation_func *func =
-                    apr_hash_get(ops, command, APR_HASH_KEY_STRING);
-            if(func != NULL) {
-                char *err = NULL;
-                apr_status_t code;
+            // only run each command once, so the default commands can be overwritten
+            if(apr_hash_get(run_commands, command, APR_HASH_KEY_STRING) == NULL) {
+                apr_hash_set(run_commands, command, APR_HASH_KEY_STRING, command);
 
-                ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, d->r, 
-                    "Executing command %s(%s), on request %s", 
-                    command, args, d->r->uri);
+                dims_operation_func *func =
+                        apr_hash_get(ops, command, APR_HASH_KEY_STRING);
+                if(func != NULL) {
+                    char *err = NULL;
+                    apr_status_t code;
 
-                if((code = func(d, args, &err)) != DIMS_SUCCESS) {
-                    return dims_cleanup(d, err, code); 
+                    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, d->r,
+                        "Executing command %s(%s), on request %s",
+                        command, args, d->r->uri);
+
+                    if((code = func(d, args, &err)) != DIMS_SUCCESS) {
+                        return dims_cleanup(d, err, code);
+                    }
                 }
             }
         }
@@ -1002,13 +1038,13 @@ dims_process_image(dims_request_rec *d)
             if((code = strip_func(d, NULL, &err)) != DIMS_SUCCESS) {
                 return dims_cleanup(d, err, code);
             }
-        }        
+        }
     }
 
     d->imagemagick_time += (apr_time_now() - start_time) / 1000;
 
     /* Disable timeouts at this point since the only thing left
-     * to do is save the image. 
+     * to do is save the image.
      */
     SetImageProgressMonitor(GetImageFromMagickWand(d->wand), NULL, NULL);
 
@@ -1026,9 +1062,10 @@ dims_handle_request(dims_request_rec *d)
         d->unparsed_commands++;
     }
 
-    d->client_id = ap_getword(d->pool, (const char **) &d->unparsed_commands, '/');
+//    d->client_id = ap_getword(d->pool, (const char **) &d->unparsed_commands, '/');
+    d->client_id = "default";
 
-    if(!(d->client_config = 
+    if(!(d->client_config =
             apr_hash_get(d->config->clients, d->client_id, APR_HASH_KEY_STRING))) {
         return dims_cleanup(d, "Application ID is not valid", DIMS_BAD_CLIENT);
     }
@@ -1053,22 +1090,22 @@ dims_handle_request(dims_request_rec *d)
             return dims_cleanup( d, "Image Key has expired", DIMS_BAD_URL);
         }
         if ( expires - now > d->config->max_expiry_period && d->config->max_expiry_period >0 ) {
-            ap_log_rerror( APLOG_MARK, APLOG_DEBUG,0, d->r, 
+            ap_log_rerror( APLOG_MARK, APLOG_DEBUG,0, d->r,
                 "Image expiry too far in the future:%s %s now=%ld",expires_str, d->r->uri,now);
             return dims_cleanup(d, "Image key too far in the future", DIMS_BAD_URL);
         }
         gen_hash = ap_md5(d->pool,
-            (unsigned char *) apr_pstrcat(d->pool, expires_str, 
+            (unsigned char *) apr_pstrcat(d->pool, expires_str,
                 d->client_config->secret_key, d->unparsed_commands, d->image_url, NULL));
-        
+ 
         if(d->client_config->secret_key == NULL) {
             gen_hash[7] = '\0';
-            ap_log_rerror(APLOG_MARK, APLOG_DEBUG,0, d->r, 
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG,0, d->r,
                 "Developer key not set for client '%s'", d->client_config->id);
             return dims_cleanup(d, "Missing Developer Key", DIMS_BAD_URL);
         } else if (strncasecmp(hash, gen_hash, 6) != 0) {
             gen_hash[7] = '\0';
-            ap_log_rerror(APLOG_MARK, APLOG_DEBUG,0, d->r, 
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG,0, d->r,
                 "Key Mismatch: wanted %6s got %6s %s", gen_hash, hash, d->r->uri);
             return dims_cleanup(d, "Key mismatch", DIMS_BAD_URL);
         }
@@ -1457,8 +1494,7 @@ dims_init(apr_pool_t *p, apr_pool_t *plog, apr_pool_t* ptemp, server_rec *s)
     apr_hash_set(ops, "resize", APR_HASH_KEY_STRING, dims_resize_operation);
     apr_hash_set(ops, "crop", APR_HASH_KEY_STRING, dims_crop_operation);
     apr_hash_set(ops, "thumbnail", APR_HASH_KEY_STRING, dims_thumbnail_operation);
-    apr_hash_set(ops, "legacy_thumbnail", APR_HASH_KEY_STRING, dims_legacy_thumbnail_operation);
-    apr_hash_set(ops, "legacy_crop", APR_HASH_KEY_STRING, dims_legacy_crop_operation);
+    apr_hash_set(ops, "unsharp", APR_HASH_KEY_STRING, dims_unsharp_operation);
     apr_hash_set(ops, "quality", APR_HASH_KEY_STRING, dims_quality_operation);
     apr_hash_set(ops, "sharpen", APR_HASH_KEY_STRING, dims_sharpen_operation);
     apr_hash_set(ops, "format", APR_HASH_KEY_STRING, dims_format_operation);
@@ -1655,6 +1691,10 @@ static const command_rec dims_commands[] =
                 dims_config_set_strip_metadata, NULL, RSRC_CONF,
                 "Should DIMS strip the metadata from the image, true OR false."
                 "The default is true."),
+    AP_INIT_TAKE1("DimsDefaultCommands",
+                dims_config_set_default_commands, NULL, RSRC_CONF,
+                "Set the Default Commands that DIMS will run for image"
+                "The default is none."),
     {NULL}
 };
 
