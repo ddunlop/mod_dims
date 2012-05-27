@@ -21,6 +21,7 @@ AC_ARG_WITH(imagemagick, [  --with-imagemagick        Specify installation direc
     LDFLAGS+=" -L$imagemagick_dir/lib"
     CFLAGS+=" -I$imagemagick_dir/include/ImageMagick"
 ],[
+    CFLAGS+=" -I/usr/include/ImageMagick"
     CFLAGS+=" -I/usr/local/include/ImageMagick"
     CFLAGS+=" -I/opt/local/include/ImageMagick"
 ])
@@ -45,7 +46,7 @@ AC_CHECK_HEADER(curl/curl.h)
 AC_ARG_WITH(apache, [  --with-apache        Specify installation directory for Apache 2.2.x], [
     LDFLAGS+=" -L$with_apache/lib"
     CFLAGS+=" -I$with_apache/include"
-    AC_PATH_PROG([APXS], apxs, , $with_apache/bin)
+    AC_PATH_PROGS([APXS], [apxs apxs2], , $with_apache/bin)
     AC_CHECK_HEADER(apr.h,, [AC_MSG_ERROR(Apache Portable Runtime headers not found.)])
     AC_CHECK_HEADER(httpd.h,, [AC_MSG_ERROR(Apache headers not found.)])
 ],[
@@ -62,7 +63,7 @@ AC_ARG_WITH(apache, [  --with-apache        Specify installation directory for A
 
     AC_CHECK_HEADER(apr.h,, [AC_MSG_ERROR(Apache Portable Runtime headers not found.)])
     AC_CHECK_HEADER(httpd.h,, [AC_MSG_ERROR(Apache headers not found.)])
-    AC_PATH_PROG([APXS], apxs)
+    AC_PATH_PROGS([APXS], [apxs apxs2])
 ])
 
 
